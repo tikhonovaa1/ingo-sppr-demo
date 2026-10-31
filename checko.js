@@ -4,7 +4,25 @@ const financialFields = {revenue:'Revenue',profit:'Profit',equity:'Equity',netAs
 const lookupState = Object.fromEntries(['client','debtor'].map(p=>[p,{generation:0,controller:null,timer:null,loaded:'',inn:$(p+'Inn').value.trim()}]));
 function scalar(v){return typeof v==='string'||typeof v==='number'?String(v):''}
 function numeric(v){if(typeof v==='number')return Number.isFinite(v)?v:null;if(typeof v==='string'&&/^-?\d+(\.\d+)?$/.test(v.trim()))return Number(v);return null}
-function normalizeChecko(body, inn, units){
+function safeMessage(value, secret=''){
+ let text=typeof value==='string'?value:scalar(value?.message)||scalar(value?.error)||scalar(value?.text)||scalar(value?.status);
+ if(secret)text=text.split(secret).join('[скрыто]');
+ return text.replace(/https?:\/\/[^\s"<>]+/g,'[адрес скрыт]').replace(/((?:api[_-]?key|key|token|authorization)\s*[=:]\s*)[^\s,;]+/gi,'$1[скрыто]').slice(0,350);
+}
+function providerError(result, secret=''){
+ if(!result)return 'сервер не вернул этот раздел';
+ const message=safeMessage(result.error,secret)||safeMessage(result.message,secret)||safeMessage(result.meta?.message,secret)||safeMessage(result.meta?.error,secret);
+ const status=typeof result.status==='number'?result.status:typeof result.httpStatus==='number'?result.httpStatus:null;
+ return [status?'HTTP '+status:'',message].filter(Boolean).join(' — ')||'успешный ответ не подтверждён';
+}
+function responseDiagnostic(body, secret=''){
+ if(!body||typeof body!=='object'||Array.isArray(body))return 'Сервер вернул неожиданный формат ответа.';
+ const top=safeMessage(body.error,secret)||safeMessage(body.message,secret);
+ if(!body.results||typeof body.results!=='object')return (top?top+'. ':'')+'В ответе отсутствует раздел results. Поля ответа: '+Object.keys(body).filter(k=>!/(key|token|auth)/i.test(k)).slice(0,12).join(', ')+'. Требуется проверка серверного формата.';
+ return Object.entries(body.results).filter(([method])=>['company','entrepreneur','finances','legal-cases','enforcements'].includes(method)).map(([method,result])=>method+': '+(result?.ok?'ответ получен':providerError(result,secret))).join('\n')||'Сервер вернул пустой раздел results.';
+}
+function normalizeChecko(body, inn, units, secret=''){
+ if(!body||!body.results||typeof body.results!=='object')throw Error(responseDiagnostic(body,secret));
  const company=body.results?.[inn.length===12?'entrepreneur':'company'];
  const d=company?.ok&&company.data&&typeof company.data==='object'?company.data:null;
  const obj={inn},notes=[];
@@ -14,7 +32,7 @@ function normalizeChecko(body, inn, units){
   const region=scalar(d.Регион?.Наим)||scalar(d.Регион)||scalar(d.ЮрАдрес?.Регион?.Наим)||scalar(d.ЮрАдрес?.Регион);
   if(region)obj.region=region;
   obj.industry=[scalar(d.ОКВЭД?.Код),scalar(d.ОКВЭД?.Наим)||scalar(d.ОКВЭД?.Наи)||scalar(d.ОКВЭД)].filter(Boolean).join(' · ');
- }else notes.push('Реквизиты не получены');
+ }else notes.push('Реквизиты: '+providerError(company,secret));
  const fin=body.results?.finances;
  if(fin?.ok&&d&&inn.length===10){
   if(units!=='rub'&&units!=='thousand')notes.push('Финансы получены; подтвердите единицы ответа API');
@@ -29,9 +47,9 @@ function normalizeChecko(body, inn, units){
     obj.year=year;notes.push('Отчётность за '+year+' год; '+(units==='rub'?'рубли':'тыс. рублей')+' → млн ₽');
    }else notes.push('Структура финансов не распознана; показатели оставлены пустыми');
   }
- }else notes.push(inn.length===12?'Для ИП бухгалтерская отчётность не запрашивается':'Финансовая отчётность недоступна');
+ }else notes.push(inn.length===12?'Для ИП бухгалтерская отчётность не запрашивается':'Финансовая отчётность: '+providerError(fin,secret));
  for(const [method,label] of [['legal-cases','Арбитраж'],['enforcements','ФССП']]){
-  const r=body.results?.[method];notes.push(label+': '+(r?.ok?'ответ получен, требуется проверка аналитиком':'сведения не получены'));
+  const r=body.results?.[method];notes.push(label+': '+(r?.ok?'ответ получен, требуется проверка аналитиком':providerError(r,secret)));
  }
  // An unfiltered or paginated list cannot prove absence of claims against the company.
  return {obj,notes,companyOk:!!d};
@@ -56,7 +74,10 @@ async function loadParty(p,force=false){
   url.searchParams.set('methods',inn.length===12?'entrepreneur,legal-cases,enforcements':'company,finances,legal-cases,enforcements');
   const response=await fetch(url,{headers:{Authorization:'Bearer '+access,Accept:'application/json'},signal:controller.signal,cache:'no-store'});
   if(!response.ok)throw Error(response.status===401||response.status===403?'Нет доступа. Проверьте код СППР и адрес страницы.':response.status===429?'Лимит обращений исчерпан. Повторите позже.':'Сервер вернул ошибку '+response.status);
-  const body=await response.json();const {obj,notes,companyOk}=normalizeChecko(body,inn,units);
+  const body=await response.json();
+  if(generation!==state.generation||$(p+'Inn').value.trim()!==inn)return;
+  $('autoLog').textContent=(p==='client'?'Клиент':'Дебитор')+' — диагностика подключения:\n'+responseDiagnostic(body,access);
+  const {obj,notes,companyOk}=normalizeChecko(body,inn,units,access);
   if(generation!==state.generation||$(p+'Inn').value.trim()!==inn)return;
   if(!companyOk)throw Error(notes.join('. '));
   clearParty(p);
@@ -65,7 +86,7 @@ async function loadParty(p,force=false){
   const retrieved=Number.isNaN(Date.parse(body.retrievedAt))?new Date().toISOString():body.retrievedAt;
   $('sources').value+=($('sources').value?'\n':'')+(p==='client'?'Клиент':'Дебитор')+': Чекко API; '+retrieved+'; ИНН '+inn+(obj.year?'; отчётность '+obj.year:'')+'; https://checko.ru/';
   state.loaded=signature;$(p+'CheckoStatus').textContent='Реквизиты загружены. '+notes.join('. ')+'.';
-  $('autoLog').textContent='Сведения загружены. Проверьте показатели и сформируйте заключение.';
+  $('autoLog').textContent+='\nСведения загружены. Проверьте показатели и сформируйте заключение.';
  }catch(error){if(generation!==state.generation)return;$(p+'CheckoStatus').textContent=error.name==='AbortError'?'Время ожидания истекло. Повторите загрузку.':error instanceof TypeError?'Не удалось связаться с сервером. Откройте СППР на настроенном адресе GitHub Pages.':error.message;
  }finally{clearTimeout(timeout);if(state.controller===controller)state.controller=null}
 }
