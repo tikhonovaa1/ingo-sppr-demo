@@ -105,11 +105,12 @@ async function loadParty(p,force=false){
   if(obj.region&&!Array.from($(p+'Region').options).some(o=>o.value===obj.region))$(p+'Region').add(new Option(obj.region,obj.region));
   applyImport(p,obj);renderDetails(p,details);if(obj.year)$(p+'Year').value=obj.year;
   const retrieved=Number.isNaN(Date.parse(body.retrievedAt))?new Date().toISOString():body.retrievedAt;
+  if(!$('asof').value)$('asof').value=new Date(retrieved).toISOString().slice(0,10);
   $('sources').value+=($('sources').value?'\n':'')+(p==='client'?'Клиент':'Дебитор')+': Чекко API; '+retrieved+'; ИНН '+inn+(obj.year?'; отчётность '+obj.year:'')+'; https://checko.ru/';
   state.loaded=signature;$(p+'CheckoStatus').textContent='Реквизиты загружены. '+notes.join('. ')+'.';
   $('autoLog').textContent+='\nСведения загружены. Проверьте показатели и сформируйте заключение.';
  }catch(error){if(generation!==state.generation)return;$(p+'CheckoStatus').textContent=error.name==='AbortError'?'Время ожидания истекло. Повторите загрузку.':error instanceof TypeError?'Не удалось связаться с сервером. Откройте СППР на настроенном адресе GitHub Pages.':error.message;
- }finally{clearTimeout(timeout);if(state.controller===controller)state.controller=null}
+ }finally{clearTimeout(timeout);if(state.controller===controller)state.controller=null;refreshScoring()}
 }
 for(const p of ['client','debtor'])$(p+'Inn').addEventListener('input',()=>queueLookup(p));
 for(const id of ['spprAccessToken','checkoUnits'])$(id).addEventListener('change',()=>{for(const p of ['client','debtor']){lookupState[p].loaded='';clearParty(p);queueLookup(p)}});
@@ -121,3 +122,11 @@ $('run').onclick=assess;
 
 for(const p of ['client','debtor'])$(p+'Import').addEventListener('change',()=>{const s=lookupState[p];clearTimeout(s.timer);s.controller?.abort();s.generation++;s.loaded='';clearParty(p);$(p+'CheckoStatus').textContent='Используется локальный импорт.'},true);
 for(const p of ['client','debtor'])for(const suffix of ['Name','Region','Industry',...Object.values(financialFields),'Claims','Court'])$(p+suffix).addEventListener('input',resetConclusion);
+
+// Recalculate from the current form only after concurrent lookups settle.
+let scoringTimer;
+function refreshScoring(){clearTimeout(scoringTimer);scoringTimer=setTimeout(()=>{if(Object.values(lookupState).every(s=>!s.controller))assess()},150)}
+for(const id of ['product','limit','delay','asof','sources'])$(id).addEventListener('input',refreshScoring);
+for(const p of ['client','debtor'])for(const suffix of ['Name','Region','Industry',...Object.values(financialFields),'Claims','Court'])$(p+suffix).addEventListener('input',refreshScoring);
+$('run').onclick=()=>{assess();$('decision').scrollIntoView({behavior:'smooth',block:'start'})};
+refreshScoring();
