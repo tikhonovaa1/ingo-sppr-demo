@@ -50,7 +50,7 @@ function evaluate(input){
  for(const [key,label] of [['client','Клиент'],['debtor','Дебитор']]){
   const p=input[key],res=parties[key];
   if(!p.innValid)add('missing',label+': ИНН не подтверждён');
-  if(!p.region)add('missing',label+': регион регистрации не подтверждён');
+  if(!p.region||p.region==='Другой регион')add('missing',label+': регион регистрации не подтверждён');
   if(p.legacyRegionStop)add('stop',label+': территориальное ограничение исходного интерфейса (на присланных фото не описано)');
   if(p.sector==='yes')add('deviation',label+': высокорискованная, неприоритетная отрасль по пункту 3');else if(p.sector!=='no')add('missing',label+': подтвердите отрасль с учётом исключений пункта 3');
   if(required.includes(key)){
